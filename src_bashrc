@@ -1,6 +1,13 @@
 #!/bin/bash
 export PATH=$PATH:"/c/msys64/usr/bin"
 export PKG_CONFIG_PATH=/c/msys64/mingw64/lib/pkgconfig:$PKG_CONFIG_PATH
+export PATH=$PATH:"~/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0/LocalCache/local-packages/Python313/Scripts"
+export PATH=$PATH:"/c/Program Files/PostgreSQL/17/bin"
+export PATH=$PATH:"/f/.programs/Qt/5.15.2/msvc2019/bin"
+export PATH=$PATH:"/c/Users/junki/.cargo/bin"
+export PATH=$PATH:"/c/Users/junki/AppData/Local/Programs/Microsoft VS Code/bin/"
+export PROMPT_DIRTRIM=3
+PGPASSWORD=postgres
 
 # Bold
 BRED="\033[1;31m"      # Red
@@ -27,8 +34,19 @@ tar_dir="$home_dir/Desktop/projects"
 df_file=".disable_fetch"
 py_file="$tar_dir/.disable_win_py"
 
+node_path="/c/Program\ Files/nodejs/node.exe"
+npm_path="/c/Program\ Files/nodejs/npm"
+
+alias node="winpty ${node_path}"
+alias npm="npm.cmd"
+alias npx="npx.cmd"
+alias supabase="npx.cmd supabase"
+alias watch="winpty watch"
+alias mysql="mysql -uroot -p"
+
 alias status="echo "" && date -r $tar_dir/.status && cat $tar_dir/.status"
 alias reload="clear && $home_dir/.bashrc"
+alias top="winpty top"
 
 running=true
 bNewBr=false
@@ -263,11 +281,6 @@ else
         py_type="MINGW64"
     fi
 fi
-
-node_path="/c/Program\ Files/nodejs/node.exe"
-npm_path="/c/Program\ Files/nodejs/npm"
-alias node="winpty ${node_path}"
-alias npm="${npm_path}"
 
 hash -r
 sync
