@@ -1,13 +1,45 @@
 #!/bin/bash
-export PATH=$PATH:"/c/msys64/usr/bin"
-export PKG_CONFIG_PATH=/c/msys64/mingw64/lib/pkgconfig:$PKG_CONFIG_PATH
-export PATH=$PATH:"~/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0/LocalCache/local-packages/Python313/Scripts"
-export PATH=$PATH:"/c/Program Files/PostgreSQL/17/bin"
-export PATH=$PATH:"/f/.programs/Qt/5.15.2/msvc2019/bin"
-export PATH=$PATH:"/c/Users/junki/.cargo/bin"
-export PATH=$PATH:"/c/Users/junki/AppData/Local/Programs/Microsoft VS Code/bin/"
+
+add_to_path() {
+    local dir="$1"
+    [ -z "$dir" ] && return
+    case ":$PATH:" in
+        *:"$dir":*) ;;
+        *)
+            if [ -z "$PATH" ]; then
+                PATH="$dir"
+            else
+                PATH="$PATH:$dir"
+            fi
+            ;;
+    esac
+}
+
+add_to_pkg_config_path() {
+    local dir="$1"
+    [ -z "$dir" ] && return
+    case ":$PKG_CONFIG_PATH:" in
+        *:"$dir":*) ;;
+        *)
+            if [ -z "$PKG_CONFIG_PATH" ]; then
+                PKG_CONFIG_PATH="$dir"
+            else
+                PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$dir"
+            fi
+            ;;
+    esac
+}
+
+add_to_path "/c/msys64/usr/bin"
+add_to_pkg_config_path "/c/msys64/mingw64/lib/pkgconfig"
+add_to_path "$HOME/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0/LocalCache/local-packages/Python313/Scripts"
+add_to_path "/c/Program Files/PostgreSQL/17/bin"
+add_to_path "/f/.programs/Qt/5.15.2/msvc2019/bin"
+add_to_path "/c/Users/junki/.cargo/bin"
+add_to_path "/c/Users/junki/AppData/Local/Programs/Microsoft VS Code/bin/"
+export PATH
+export PKG_CONFIG_PATH
 export PROMPT_DIRTRIM=3
-PGPASSWORD=postgres
 
 # Bold
 BRED="\033[1;31m"      # Red
@@ -30,28 +62,36 @@ cd ~
 home_dir=$(pwd)
 cd "$cur_dir"
 
-tar_dir="$home_dir/Desktop/projects"
-df_file=".disable_fetch"
+tar_dir="${PROJECTS_ROOT:-$home_dir/Desktop/projects}"
+mkdir -p "$tar_dir"
+df_file="$tar_dir/.disable_fetch"
 py_file="$tar_dir/.disable_win_py"
 
 node_path="/c/Program\ Files/nodejs/node.exe"
 npm_path="/c/Program\ Files/nodejs/npm"
 
-alias node="winpty ${node_path}"
+node() {
+    winpty "$node_path" "$@"
+}
 alias npm="npm.cmd"
 alias npx="npx.cmd"
 alias supabase="npx.cmd supabase"
 alias watch="winpty watch"
 alias mysql="mysql -uroot -p"
 
-alias status="echo "" && date -r $tar_dir/.status && cat $tar_dir/.status"
-alias reload="clear && $home_dir/.bashrc"
+alias status="echo \"\" && date -r \"$tar_dir/.status\" && cat \"$tar_dir/.status\""
+reload() {
+    clear
+    # shellcheck disable=SC1090
+    source "$home_dir/.bashrc"
+}
 alias top="winpty top"
 
 running=true
 bNewBr=false
 bNewCO=false
 bUnstg=false
+declare -a pids=()
 
 cleanup() {
     if ! $running; then
@@ -60,10 +100,15 @@ cleanup() {
     
     running=false
     echo -e "\nCancelling fetch..."
-    for job in $(jobs -p); do
-        disown "$job" 2>/dev/null
-    done
-    kill 0 2>/dev/null
+    if [ ${#pids[@]} -gt 0 ]; then
+        for job in "${pids[@]}"; do
+            if kill -0 "$job" 2>/dev/null; then
+                kill "$job" 2>/dev/null
+            fi
+        done
+        wait "${pids[@]}" 2>/dev/null
+        pids=()
+    fi
     [ -d "$tmp_dir" ] && rm -rf "$tmp_dir" 2>/dev/null
     cd "$home_dir"
 }
@@ -148,14 +193,13 @@ git_chk_branches() {
     for branch in "${branches[@]}"; do
         (
             local branch_out="" UPSTREAM BEHIND AHEAD diffstat formatted_diff
-            # Get upstream; if not set, try to set it.
+            # Get upstream; if not set, report it instead of modifying configuration.
             UPSTREAM=$(git rev-parse --abbrev-ref "$branch@{upstream}" 2>/dev/null || echo "")
             if [ -z "$UPSTREAM" ]; then
-                if ! git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-                    exit 0
+                if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+                    echo "updates:'$branch' [ ${YEL}no upstream configured${NC} ]" >> "$tmp_dir/results.txt"
                 fi
-                git branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1
-                UPSTREAM="origin/$branch"
+                exit 0
             fi
 
             BEHIND=$(git rev-list --count "$branch..$UPSTREAM" 2>/dev/null || echo 0)
@@ -262,7 +306,9 @@ git_chk_branches() {
 ############################################################################################################
 if [ ! -f "$py_file" ] && { [ "$cur_dir" = "$home_dir" ] || [ "$cur_dir" = "$tar_dir" ]; }; then
     echo "0" > "$py_file"
-    attrib +h "$py_file" 2>/dev/null
+    if command -v attrib >/dev/null 2>&1; then
+        attrib +h "$py_file" 2>/dev/null
+    fi
 fi
 
 if [[ "$OSTYPE" == "linux-gnu"* || "$OSTYPE" == "darwin"* ]]; then
@@ -299,7 +345,9 @@ fi
 ############################################################################################################
 if [ ! -f "$df_file" ] && { [ "$cur_dir" = "$home_dir" ] || [ "$cur_dir" = "$tar_dir" ]; }; then
     echo "0" > "$df_file"
-    attrib +h "$df_file" 2>/dev/null
+    if command -v attrib >/dev/null 2>&1; then
+        attrib +h "$df_file" 2>/dev/null
+    fi
 fi
 
 if [ -f "$df_file" ] && [ "$(cat "$df_file")" -eq "1" ]; then
@@ -339,11 +387,11 @@ trap cleanup SIGINT SIGTERM
 cols=$(tput cols)
 total_repo=0
 pass_repo=0
-declare -a pids
 declare -a repo_list
 tmp_dir=$(mktemp -d)
 
-start_time=$(date +%s%3N)
+pids=()
+start_time=$(date +%s)
 for dir in "$tar_dir"/*; do
     [ "$running" != true ] && [ "${BASH_SOURCE[0]}" != "$0" ] && return
     [ ! -d "$dir/.git" ] && continue
@@ -369,14 +417,14 @@ for dir in "$tar_dir"/*; do
 
         if [ -d "$tmp_dir" ]; then
             cat "$tmp_new" "$tmp_branch" > "$tmp_dir/$repo_name.log"
-            rm -f "$tmp_branch" "$tmp_new" "$repo_name.log" > /dev/null 2>&1
+            rm -f "$tmp_branch" "$tmp_new" > /dev/null 2>&1
         fi
     ) &
     pids+=($!)
 done
 
 if [ $total_repo -eq 0 ]; then
-    echo -e "${BLUE}* no previous fetch status.${NC}" > $tar_dir/.status
+    echo -e "${BLUE}* no previous fetch status.${NC}" > "$tar_dir/.status"
     if [ "${BASH_SOURCE[0]}" != "$0" ]; then
         return
     else
@@ -390,23 +438,23 @@ for pid in "${pids[@]}"; do
     [ $? -eq 0 ] && ((pass_repo++))
 done
 
-end_time=$(date +%s%3N)
+end_time=$(date +%s)
 elapsed=$(($end_time - $start_time))
-elapsed_sec=$(awk "BEGIN {printf \"%.1f\", $elapsed/1000}")
+elapsed_sec=$elapsed
 
-if [ "$running" == true ]; then 
+if [ "$running" == true ]; then
     # Group branch info by repo.
-    echo "" > $tar_dir/.status
+    : > "$tar_dir/.status"
     for repo in "${repo_list[@]}"; do
         if [ -s "$tmp_dir/$repo.log" ]; then
-            echo -e "${YEL}[ $repo ]${NC}" >> $tar_dir/.status
-            cat "$tmp_dir/$repo.log" >> $tar_dir/.status
-            printf "%0.s─" $(seq 1 $cols) >> $tar_dir/.status
-            echo -e "\n" >> $tar_dir/.status
+            echo -e "${YEL}[ $repo ]${NC}" >> "$tar_dir/.status"
+            cat "$tmp_dir/$repo.log" >> "$tar_dir/.status"
+            printf "%0.s─" $(seq 1 $cols) >> "$tar_dir/.status"
+            echo -e "\n" >> "$tar_dir/.status"
         fi
     done
-    
-    cat $tar_dir/.status
+
+    cat "$tar_dir/.status"
 
     if [ "$total_repo" -eq "$pass_repo" ]; then
         echo -e "${GREEN}[SUCCESS]${NC} Fetched ${total_repo} repositories in ${elapsed_sec}s"
