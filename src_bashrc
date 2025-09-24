@@ -67,16 +67,19 @@ mkdir -p "$tar_dir"
 df_file="$tar_dir/.disable_fetch"
 py_file="$tar_dir/.disable_win_py"
 
-node_path="/c/Program\ Files/nodejs/node.exe"
-npm_path="/c/Program\ Files/nodejs/npm"
+node_path="/c/Program Files/nodejs/node.exe"
 
-node() {
-    winpty "$node_path" "$@"
-}
+if command -v winpty >/dev/null 2>&1; then
+    alias node="winpty \"$node_path\""
+    alias watch="winpty watch"
+    alias top="winpty top"
+else
+    alias node="\"$node_path\""
+fi
+
 alias npm="npm.cmd"
 alias npx="npx.cmd"
 alias supabase="npx.cmd supabase"
-alias watch="winpty watch"
 alias mysql="mysql -uroot -p"
 
 alias status="echo \"\" && date -r \"$tar_dir/.status\" && cat \"$tar_dir/.status\""
@@ -85,8 +88,6 @@ reload() {
     # shellcheck disable=SC1090
     source "$home_dir/.bashrc"
 }
-alias top="winpty top"
-
 running=true
 bNewBr=false
 bNewCO=false
