@@ -93,6 +93,48 @@ bNewBr=false
 bNewCO=false
 bUnstg=false
 declare -a pids=()
+tmp_dir=""
+
+git_fetch_remotes() {
+    local -a remotes=()
+    mapfile -t remotes < <(git remote 2>/dev/null)
+    if [ ${#remotes[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    declare -A to_fetch=()
+    while IFS= read -r remote_name; do
+        [ -z "$remote_name" ] && continue
+        to_fetch["$remote_name"]=1
+    done < <(git for-each-ref --format='%(upstream:remotename)' refs/heads 2>/dev/null)
+
+    if [ ${#to_fetch[@]} -eq 0 ]; then
+        local remote
+        for remote in "${remotes[@]}"; do
+            if [ "$remote" = "origin" ]; then
+                to_fetch["origin"]=1
+                break
+            fi
+        done
+        if [ ${#to_fetch[@]} -eq 0 ]; then
+            to_fetch["${remotes[0]}"]=1
+        fi
+    fi
+
+    local -a fetch_list=()
+    local remote
+    for remote in "${!to_fetch[@]}"; do
+        fetch_list+=("$remote")
+    done
+    IFS=$'\n' fetch_list=($(printf '%s\n' "${fetch_list[@]}" | sort))
+    unset IFS
+
+    for remote in "${fetch_list[@]}"; do
+        git fetch --no-progress --prune "$remote" > /dev/null 2>&1 || return 1
+    done
+
+    return 0
+}
 
 cleanup() {
     if ! $running; then
@@ -126,147 +168,196 @@ git() {
 git_chk_newBR(){
     [ "$running" != true ] && return
 
-    # Load branch lists into arrays
-    local local_branches=() remote_branches=() new_branches=()
-    readarray -t local_branches < <(git branch --format="%(refname:short)" 2>/dev/null)
-    readarray -t remote_branches < <(git branch -r --format="%(refname:lstrip=3)" 2>/dev/null | grep -vE 'HEAD')
+    local -a local_branches=()
+    mapfile -t local_branches < <(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
 
-    # Build a lookup table for local branches.
-    declare -A local_map
+    declare -A local_map=()
+    local branch
     for branch in "${local_branches[@]}"; do
-         local_map["$branch"]=1
+        local_map["$branch"]=1
     done
 
-    # Iterate remote branches and add those not in the lookup.
-    for rb in "${remote_branches[@]}"; do
-         if [[ ${local_map[$rb]:-0} -eq 1 ]]; then
-              continue
-         fi
-         new_branches+=("$rb")
+    local -a remote_branches=()
+    mapfile -t remote_branches < <(git for-each-ref --format='%(refname:strip=2)' 'refs/remotes/*' 2>/dev/null)
+
+    local -a new_branches=()
+    local remote_entry remote_branch
+    for remote_entry in "${remote_branches[@]}"; do
+        [ -z "$remote_entry" ] && continue
+        [[ $remote_entry == */HEAD ]] && continue
+        remote_branch=${remote_entry#*/}
+        if [ -z "${local_map[$remote_branch]}" ]; then
+            new_branches+=("$remote_entry")
+        fi
     done
 
-    # Print header if there are any new branches.
     [ "${#new_branches[@]}" -lt 1 ] && return
 
     local header prefix last_prefix i rb_item
     if [ "$bNewCO" = false ] && [ "$bUnstg" = false ]; then
-         header="└──"
-         prefix="\t├──"
-         last_prefix="\t└──"
+        header="└──"
+        prefix=$'\t├──'
+        last_prefix=$'\t└──'
     else
-         header="├──"
-         prefix="│\t├──"
-         last_prefix="│\t└──"
+        header="├──"
+        prefix=$'│\t├──'
+        last_prefix=$'│\t└──'
     fi
+
     echo -e "│"
     echo -e "$header ${BLUE}[ BRANCHES ]${NC}"
     for i in "${!new_branches[@]}"; do
-         rb_item="${new_branches[$i]}"
-         if [ "$i" -eq "$(( ${#new_branches[@]} - 1 ))" ]; then
-             echo -e "$last_prefix \"$rb_item\""
-         else
-             echo -e "$prefix \"$rb_item\""
-         fi
+        rb_item="${new_branches[$i]}"
+        if [ "$i" -eq $(( ${#new_branches[@]} - 1 )) ]; then
+            echo -e "$last_prefix \"$rb_item\""
+        else
+            echo -e "$prefix \"$rb_item\""
+        fi
     done
 
     if [ "$bNewCO" = false ] && [ "$bUnstg" = false ]; then
-         echo ""
+        echo ""
     fi
 }
 
 git_chk_branches() {
     [ "$running" != true ] && return
 
-    local updates=() unstaged=() current_branch
-    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    local current_branch
+    current_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 
     local STASH
     STASH=$(git rev-list --walk-reflogs --ignore-missing --count refs/stash 2>/dev/null)
 
-    local branches=()
-    readarray -t branches < <(git branch --format="%(refname:short)" 2>/dev/null)
+    declare -A remote_branch_lookup=()
+    local remote_ref branch_name
+    while IFS= read -r remote_ref; do
+        [ -z "$remote_ref" ] && continue
+        [[ $remote_ref == */HEAD ]] && continue
+        branch_name=${remote_ref#*/}
+        remote_branch_lookup["$branch_name"]=1
+    done < <(git for-each-ref --format='%(refname:strip=2)' 'refs/remotes/*' 2>/dev/null)
 
-    # Create temporary directory for parallel results.
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-
-    local pids=()
-    for branch in "${branches[@]}"; do
-        (
-            local branch_out="" UPSTREAM BEHIND AHEAD diffstat formatted_diff
-            # Get upstream; if not set, report it instead of modifying configuration.
-            UPSTREAM=$(git rev-parse --abbrev-ref "$branch@{upstream}" 2>/dev/null || echo "")
-            if [ -z "$UPSTREAM" ]; then
-                if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-                    echo "updates:'$branch' [ ${YEL}no upstream configured${NC} ]" >> "$tmp_dir/results.txt"
-                fi
-                exit 0
+    local -a updates=()
+    while IFS=$'\t' read -r branch upstream track; do
+        [ -z "$branch" ] && continue
+        if [ -z "$upstream" ]; then
+            if [ -n "${remote_branch_lookup[$branch]}" ]; then
+                updates+=("'$branch' [ ${YEL}no upstream configured${NC} ]")
             fi
+            continue
+        fi
 
-            BEHIND=$(git rev-list --count "$branch..$UPSTREAM" 2>/dev/null || echo 0)
-            AHEAD=$(git rev-list --count "$UPSTREAM..$branch" 2>/dev/null || echo 0)
+        local ahead=0 behind=0
+        if [[ $track =~ ahead[[:space:]]+([0-9]+) ]]; then
+            ahead=${BASH_REMATCH[1]}
+        fi
+        if [[ $track =~ behind[[:space:]]+([0-9]+) ]]; then
+            behind=${BASH_REMATCH[1]}
+        fi
 
-            # For the current branch, check for unstaged changes.
-            if [ "$branch" = "$current_branch" ]; then
-                diffstat=$(git diff HEAD --shortstat 2>/dev/null)
-                if [ -n "$diffstat" ]; then
-                    if echo "$diffstat" | grep -q "changed"; then
-                        formatted_diff=$(echo "$diffstat" | sed -E \
-                            -e 's/([0-9]+) file(s)? changed/\1 file\2,/' \
-                            -e 's/, ([0-9]+) (insertion|addition)s?\(\+\)/ +\1/' \
-                            -e 's/, ([0-9]+) (deletion|deletions?)\(-\)/ -\1/')
-                    else
-                        formatted_diff="$diffstat"
-                    fi
-                    formatted_diff=$(echo "$formatted_diff" | sed -E "s/\+([0-9]+)/$(printf '%b' "$GREEN")+\1$(printf '%b' "$NC")/g")
-                    formatted_diff=$(echo "$formatted_diff" | sed -E "s/ -([0-9]+)/ $(printf '%b' "$RED")-\1$(printf '%b' "$NC")/g")
-                    echo "unstaged:'$branch' →$formatted_diff" >> "$tmp_dir/results.txt"
-                fi
+        if [ "$behind" -gt 0 ] || [ "$ahead" -gt 0 ]; then
+            local status="[ "
+            if [ "$behind" -gt 0 ]; then
+                status+="${RED}▼$behind${NC}"
             fi
-
-            # Skip if no commit differences.
-            if [ "$BEHIND" -lt 1 ] && [ "$AHEAD" -lt 1 ]; then
-                exit 0
+            if [ "$behind" -gt 0 ] && [ "$ahead" -gt 0 ]; then
+                status+=" "
             fi
-
-            if [ "$BEHIND" -gt 0 ] && [ "$AHEAD" -gt 0 ]; then
-                echo "updates:'$branch' [ ${RED}▼$BEHIND${NC} ${GREEN}▲$AHEAD${NC} ]" >> "$tmp_dir/results.txt"
-            elif [ "$BEHIND" -gt 0 ]; then
-                echo "updates:'$branch' [ ${RED}▼$BEHIND${NC} ]" >> "$tmp_dir/results.txt"
-            elif [ "$AHEAD" -gt 0 ]; then
-                echo "updates:'$branch' [ ${GREEN}▲$AHEAD${NC} ]" >> "$tmp_dir/results.txt"
+            if [ "$ahead" -gt 0 ]; then
+                status+="${GREEN}▲$ahead${NC}"
             fi
-        ) &
-        pids+=($!)
+            status+=" ]"
+            updates+=("'$branch' $status")
+        fi
+    done < <(git for-each-ref --format='%(refname:short)%09%(upstream:short)%09%(upstream:track)' refs/heads 2>/dev/null)
+
+    local -a status_lines=()
+    mapfile -t status_lines < <(git status --porcelain 2>/dev/null)
+
+    local tracked_total=0 added=0 deleted=0 modified=0 renamed=0 untracked=0
+    declare -A tracked_seen=()
+    local entry x y path
+    for entry in "${status_lines[@]}"; do
+        [ -z "$entry" ] && continue
+        x=${entry:0:1}
+        y=${entry:1:1}
+        path=${entry:3}
+
+        if [ "$x$y" = "??" ]; then
+            ((untracked++))
+            continue
+        fi
+
+        if [[ $path == *" -> "* ]]; then
+            path=${path##* -> }
+        fi
+
+        if [ -z "${tracked_seen[$path]}" ]; then
+            tracked_seen["$path"]=1
+            ((tracked_total++))
+        fi
+
+        if [ "$x" = "A" ] || [ "$y" = "A" ]; then
+            ((added++))
+        fi
+        if [ "$x" = "D" ] || [ "$y" = "D" ]; then
+            ((deleted++))
+        fi
+        if [ "$x" = "R" ] || [ "$y" = "R" ]; then
+            ((renamed++))
+        fi
+        if [ "$x" = "M" ] || [ "$y" = "M" ] || [ "$x" = "C" ] || [ "$y" = "C" ] || [ "$x" = "U" ] || [ "$y" = "U" ]; then
+            ((modified++))
+        fi
     done
 
-    for pid in "${pids[@]}"; do
-        wait "$pid"
-    done
+    local total_changed=$((tracked_total + untracked))
+    local -a unstaged=()
+    if [ "$total_changed" -gt 0 ] && [ -n "$current_branch" ]; then
+        local message="→ ${total_changed} file"
+        [ "$total_changed" -ne 1 ] && message+="s"
+        message+=" changed"
 
-    # Gather results.
-    if [ -f "$tmp_dir/results.txt" ]; then
-        while IFS= read -r line; do
-            local type=${line%%:*}
-            local entry=${line#*:}
-            if [ "$type" = "updates" ]; then
-                updates+=("$entry")
-            elif [ "$type" = "unstaged" ]; then
-                unstaged+=("$entry")
-            fi
-        done < "$tmp_dir/results.txt"
-        rm -rf "$tmp_dir"
+        local -a details=()
+        if [ "$added" -gt 0 ]; then
+            details+=("${GREEN}+${added}${NC} new")
+        fi
+        if [ "$modified" -gt 0 ]; then
+            details+=("${GREEN}${modified}${NC} modified")
+        fi
+        if [ "$deleted" -gt 0 ]; then
+            details+=("${RED}-${deleted}${NC} deleted")
+        fi
+        if [ "$renamed" -gt 0 ]; then
+            details+=("$renamed renamed")
+        fi
+        if [ "$untracked" -gt 0 ]; then
+            details+=("$untracked untracked")
+        fi
+
+        if [ ${#details[@]} -gt 0 ]; then
+            message+=" ("
+            local idx
+            for idx in "${!details[@]}"; do
+                [ "$idx" -gt 0 ] && message+=", "
+                message+="${details[$idx]}"
+            done
+            message+=")"
+        fi
+
+        unstaged+=("'$current_branch' ${message}")
     fi
 
     local header prefix last_prefix i
     if [ "${#unstaged[@]}" -lt 1 ]; then
         header="└──"
-        prefix="\t├──"
-        last_prefix="\t└──"
+        prefix=$'\t├──'
+        last_prefix=$'\t└──'
     else
         header="├──"
-        prefix="│\t├──"
-        last_prefix="│\t└──"
+        prefix=$'│\t├──'
+        last_prefix=$'│\t└──'
     fi
 
     if [ "${#updates[@]}" -gt 0 ]; then
@@ -274,7 +365,7 @@ git_chk_branches() {
         echo -e "│"
         echo -e "$header ${PUR}[ COMMITS ]${NC}"
         for i in "${!updates[@]}"; do
-            if [ "$i" -eq "$(( ${#updates[@]} - 1 ))" ]; then
+            if [ "$i" -eq $(( ${#updates[@]} - 1 )) ]; then
                 echo -e "$last_prefix ${updates[$i]}"
             else
                 echo -e "$prefix ${updates[$i]}"
@@ -288,7 +379,7 @@ git_chk_branches() {
         echo -e "│"
         echo -e "└── ${RED}[ UNSTAGED ]${NC}"
         for i in "${!unstaged[@]}"; do
-            if [ "$i" -eq "$(( ${#unstaged[@]} - 1 ))" ]; then
+            if [ "$i" -eq $(( ${#unstaged[@]} - 1 )) ]; then
                 echo -e "\t└── ${unstaged[$i]}"
             else
                 echo -e "\t├── ${unstaged[$i]}"
@@ -389,39 +480,27 @@ cols=$(tput cols)
 total_repo=0
 pass_repo=0
 declare -a repo_list
-tmp_dir=$(mktemp -d)
+declare -a repo_dirs
+declare -a fetch_pids
+declare -A repo_logs
+declare -A repo_success
+declare -A repo_errors
 
-pids=()
 start_time=$(date +%s)
 for dir in "$tar_dir"/*; do
     [ "$running" != true ] && [ "${BASH_SOURCE[0]}" != "$0" ] && return
     [ ! -d "$dir/.git" ] && continue
-    
+
     repo_name=$(basename "$dir")
     echo "Fetching: $repo_name..."
     ((total_repo++))
     repo_list+=("$repo_name")
+    repo_dirs+=("$dir")
     (
-        cd "$dir" || return
-        git -C "$dir" fetch --no-progress --all --prune > /dev/null 2>&1
-
-        if [ $? -ne 0 ] && [ -d "$tmp_dir" ]; then
-            echo -e "${RED}[ERROR] Failed to fetch repo: $repo_name! Ensure access!${NC}\n" > "$tmp_dir/$repo_name.log"
-            exit 1
-        fi
-
-        tmp_branch=$(mktemp)
-        tmp_new=$(mktemp)
-
-        git_chk_branches > "$tmp_branch" 2>&1
-        git_chk_newBR > "$tmp_new" 2>&1
-
-        if [ -d "$tmp_dir" ]; then
-            cat "$tmp_new" "$tmp_branch" > "$tmp_dir/$repo_name.log"
-            rm -f "$tmp_branch" "$tmp_new" > /dev/null 2>&1
-        fi
+        cd "$dir" || exit 1
+        git_fetch_remotes
     ) &
-    pids+=($!)
+    fetch_pids+=($!)
 done
 
 if [ $total_repo -eq 0 ]; then
@@ -434,9 +513,31 @@ if [ $total_repo -eq 0 ]; then
 fi
 
 # Wait for all fetches.
-for pid in "${pids[@]}"; do
-    wait "$pid"
-    [ $? -eq 0 ] && ((pass_repo++))
+for i in "${!fetch_pids[@]}"; do
+    pid=${fetch_pids[$i]}
+    repo=${repo_list[$i]}
+    if wait "$pid"; then
+        repo_success["$repo"]=1
+        ((pass_repo++))
+    else
+        repo_success["$repo"]=0
+        repo_errors["$repo"]="${RED}[ERROR] Failed to fetch repo: $repo! Ensure access!${NC}\n"
+    fi
+done
+
+# Gather branch information for successfully fetched repos.
+for i in "${!repo_dirs[@]}"; do
+    repo=${repo_list[$i]}
+    dir=${repo_dirs[$i]}
+    [ "${repo_success[$repo]}" != 1 ] && continue
+    repo_logs["$repo"]=$( \
+        cd "$dir" || exit 0
+        bNewCO=false
+        bUnstg=false
+        branch_output=$(git_chk_branches)
+        new_branch_output=$(git_chk_newBR)
+        printf '%s%s' "$new_branch_output" "$branch_output"
+    )
 done
 
 end_time=$(date +%s)
@@ -447,11 +548,20 @@ if [ "$running" == true ]; then
     # Group branch info by repo.
     : > "$tar_dir/.status"
     for repo in "${repo_list[@]}"; do
-        if [ -s "$tmp_dir/$repo.log" ]; then
-            echo -e "${YEL}[ $repo ]${NC}" >> "$tar_dir/.status"
-            cat "$tmp_dir/$repo.log" >> "$tar_dir/.status"
-            printf "%0.s─" $(seq 1 $cols) >> "$tar_dir/.status"
-            echo -e "\n" >> "$tar_dir/.status"
+        local_output="${repo_logs[$repo]}"
+        local_error="${repo_errors[$repo]}"
+        if [ -n "$local_output" ] || [ -n "$local_error" ]; then
+            {
+                echo -e "${YEL}[ $repo ]${NC}"
+                if [ -n "$local_error" ]; then
+                    echo -e "$local_error"
+                fi
+                if [ -n "$local_output" ]; then
+                    printf "%s" "$local_output"
+                fi
+                printf "%0.s─" $(seq 1 $cols)
+                echo -e "\n"
+            } >> "$tar_dir/.status"
         fi
     done
 
@@ -464,5 +574,4 @@ if [ "$running" == true ]; then
     fi
 fi
 
-[ -d "$tmp_dir" ] && rm -rf "$tmp_dir" 2>/dev/null
 running=false
