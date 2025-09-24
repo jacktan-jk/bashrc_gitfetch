@@ -82,11 +82,11 @@ alias npx="npx.cmd"
 alias supabase="npx.cmd supabase"
 alias mysql="mysql -uroot -p"
 
-alias status="echo \"\" && date -r \"$tar_dir/.status\" && cat \"$tar_dir/.status\""
+alias status="echo \"\" && date -r \"$tar_dir/.status\" && echo "" && cat \"$tar_dir/.status\""
 reload() {
     clear
     # shellcheck disable=SC1090
-    source "$home_dir/.bashrc"
+    "$home_dir/.bashrc"
 }
 running=true
 bNewBr=false
@@ -442,7 +442,7 @@ done
 end_time=$(date +%s)
 elapsed=$(($end_time - $start_time))
 elapsed_sec=$elapsed
-
+echo ""
 if [ "$running" == true ]; then
     # Group branch info by repo.
     : > "$tar_dir/.status"
