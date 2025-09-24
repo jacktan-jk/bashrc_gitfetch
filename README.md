@@ -1,6 +1,7 @@
 # Bash Git Fetch Automation
 
 This repository contains `src_bashrc`, a Bash profile script that prepares a hybrid Windows/MSYS2 development environment and orchestrates background `git fetch` status checks for every repository inside a designated projects directory.
+![gitfetch-1](https://github.com/user-attachments/assets/2a2fcb4a-9632-45ae-bbdc-20f0ac7645b1)
 
 ## Features
 
