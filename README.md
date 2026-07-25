@@ -46,6 +46,16 @@ On start-up the script prints internet/Python diagnostics, then begins fetching 
 - Inspect previous results at any time via the `status` alias or by opening `.status` directly.
 - Customize ANSI colors, aliases, and PATH additions to suit your environment.
 
+## Debugging
+Enable Git Fetch profiling:
+```bash
+FETCH_PROFILE=1 source ~/.bashrc
+```
+Overriding SSH Timeout:
+```bash
+GIT_SSH_CONNECT_TIMEOUT=10 source ~/.bashrc
+```
+
 ## Requirements
 
 - Bash 4+
